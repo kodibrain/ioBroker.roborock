@@ -230,370 +230,82 @@ export class V1VacuumFeatures extends BaseDeviceFeatures {
 	}
 
 	@BaseDeviceFeatures.DeviceFeature(Feature.DockingStationStatus)
-	protected async initDockingStationStatus(): Promise<void> {
+	protected async createDockingStationStatusStates(): Promise<void> {
 		await this.deps.ensureFolder(`Devices.${this.duid}.dockingStationStatus`);
-		const statusNames = ["cleanFluidStatus", "waterBoxFilterStatus", "dustBagStatus", "dirtyWaterBoxStatus", "clearWaterBoxStatus", "isUpdownWaterReady"];
-		for (const name of statusNames) {
-			await this.deps.ensureState(`Devices.${this.duid}.dockingStationStatus.${name}`, { name, type: "number", role: "value", read: true, write: false });
-		}
-	}
 
-	public async updateDockingStationStatus(dss: number): Promise<void> {
-		// Guard: Feature must be active
-		if (!this.appliedFeatures.has(Feature.DockingStationStatus)) return;
-
-		const status = {
-			cleanFluidStatus: (dss >> 10) & 0b11,
-			waterBoxFilterStatus: (dss >> 8) & 0b11,
-			dustBagStatus: (dss >> 6) & 0b11,
-			dirtyWaterBoxStatus: (dss >> 4) & 0b11,
-			clearWaterBoxStatus: (dss >> 2) & 0b11,
-			isUpdownWaterReady: dss & 0b11,
+		const commonStates = {
+			0: "UNKNOWN",
+			1: "ERROR",
+			2: "OK"
 		};
 
-		for (const [name, val] of Object.entries(status)) {
-			await this.deps.adapter.setStateChanged(`Devices.${this.duid}.dockingStationStatus.${name}`, { val, ack: true });
-		}
-	}
+		const stateDefinitions = [
+			{ key: "cleanFluidStatus", name: "Clean Water Tank" },
+			{ key: "waterBoxFilterStatus", name: "Water Box Filter" },
+			{ key: "dustBagStatus", name: "Dust Bag" },
+			{ key: "dirtyWaterBoxStatus", name: "Dirty Water Tank" },
+			{ key: "clearWaterBoxStatus", name: "Clear Water Box" },
+			{ key: "isUpdownWaterReady", name: "Water Ready Status" }
+		];
 
-	@BaseDeviceFeatures.DeviceFeature(Feature.MultiMap)
-	public async updateMultiMapsList(): Promise<void> {
-		const mapList = await this.mapService.updateMultiMapsList();
-		if (mapList && Array.isArray(mapList)) {
-			// Update the load_multi_map command states to populate dropdown
-			const states: Record<string, string> = {};
-			for (const map of mapList) {
-				states[String(map.mapFlag)] = map.name || `Map ${map.mapFlag}`;
-			}
-
-			await this.deps.adapter.extendObject(`Devices.${this.duid}.commands.load_multi_map`, {
-				common: {
-					type: "number",
-					role: "value",
-					states: states
-				}
+		for (const stateDef of stateDefinitions) {
+			await this.ensureState("dockingStationStatus", stateDef.key, {
+				name: stateDef.name,
+				type: "number",
+				role: "value",
+				read: true,
+				write: false,
+				states: commonStates
 			});
-		} else {
-			await super.updateMultiMapsList();
 		}
 	}
 
-	@BaseDeviceFeatures.DeviceFeature(Feature.RoomMapping)
-	public async updateRoomMapping(): Promise<void> {
-		await this.mapService.updateRoomMapping();
+	protected async updateDockingStationStatus(dss: number): Promise<void> {
+		// guard against invalid payloads
+		if (typeof dss !== "number" || Number.isNaN(dss)) {
+			return;
+		}
+
+		const cleanFluidStatus = (dss & 3) >>> 0;
+		const waterBoxFilterStatus = ((dss >> 2) & 3) >>> 0;
+		const dustBagStatus = ((dss >> 4) & 3) >>> 0;
+		const dirtyWaterBoxStatus = ((dss >> 6) & 3) >>> 0;
+		const clearWaterBoxStatus = ((dss >> 8) & 3) >>> 0;
+		const isUpdownWaterReady = ((dss >> 10) & 3) >>> 0;
+
+		await this.deps.adapter.setStateAsync(
+			`${this.deps.id}.Devices.${this.duid}.dockingStationStatus.cleanFluidStatus`,
+			cleanFluidStatus,
+			true
+		);
+		await this.deps.adapter.setStateAsync(
+			`${this.deps.id}.Devices.${this.duid}.dockingStationStatus.waterBoxFilterStatus`,
+			waterBoxFilterStatus,
+			true
+		);
+		await this.deps.adapter.setStateAsync(
+			`${this.deps.id}.Devices.${this.duid}.dockingStationStatus.dustBagStatus`,
+			dustBagStatus,
+			true
+		);
+		await this.deps.adapter.setStateAsync(
+			`${this.deps.id}.Devices.${this.duid}.dockingStationStatus.dirtyWaterBoxStatus`,
+			dirtyWaterBoxStatus,
+			true
+		);
+		await this.deps.adapter.setStateAsync(
+			`${this.deps.id}.Devices.${this.duid}.dockingStationStatus.clearWaterBoxStatus`,
+			clearWaterBoxStatus,
+			true
+		);
+		await this.deps.adapter.setStateAsync(
+			`${this.deps.id}.Devices.${this.duid}.dockingStationStatus.isUpdownWaterReady`,
+			isUpdownWaterReady,
+			true
+		);
 	}
 
-	public override async getCommandParams(method: string, params?: unknown, id?: string): Promise<unknown> {
-		if (method === "reset_consumable" && id) {
-			const obj = await this.deps.adapter.getObjectAsync(id);
-			if (obj && obj.native && obj.native.resetParam) {
-				const resetParam = obj.native.resetParam;
-				this.deps.adapter.rLog("System", this.duid, "Info", "1.0", undefined, `Resetting consumable: ${resetParam} (via native param)`, "info");
-				return [resetParam];
-			}
-			// Fallback if no native param (should not happen with new setup)
-			this.deps.adapter.rLog("System", this.duid, "Warn", "1.0", undefined, `Reset consumable called without native param for ${id}`, "warn");
-		}
-
-		if (method === "set_clean_motor_mode") {
-			// Log shows "set_clean_motor_mode" works, but expects params as array: [{...}]
-			let finalParams = params;
-
-			// If input is a string (e.g. from Dropdown/Presets), parse it first
-			if (typeof finalParams === "string") {
-				try {
-					finalParams = JSON.parse(finalParams);
-				} catch (e: any) {
-					this.deps.adapter.log.warn(`[getCommandParams] Failed to parse set_clean_motor_mode params: ${finalParams} - Error: ${e.message}`);
-				}
-			}
-
-			if (finalParams && !Array.isArray(finalParams)) {
-				finalParams = [finalParams];
-			}
-			return {
-				method: "set_clean_motor_mode",
-				params: finalParams
-			};
-		}
-
-		if (method === "load_multi_map") {
-			// Reset current map index -> Next status update triggers room refresh
-			this.mapService.resetCurrentMapIndex();
-
-			// User request: active fetch status after map load to ensure trigger
-			// We trigger these in the background immediately
-			(async () => {
-				await new Promise(r => setTimeout(r, 2000));
-				await this.updateStatus().catch(() => {});
-				// Trigger map and room sync directly like 0.6.19
-				await this.mapService.updateMap().catch(() => {});
-				await this.mapService.updateRoomMapping().catch(() => {});
-			})();
-
-			// V1 protocol (0.6.19) expects [number] for load_multi_map
-			return [params];
-		}
-
-		if (method === "app_segment_clean") {
-			// If params are explicitly provided (e.g. from single room button), use them.
-			if (params && (Array.isArray(params) || typeof params === "object")) {
-				// If it's just a room ID or array of IDs, wrap it in the correct payload structure
-				if (Array.isArray(params) && typeof params[0] === "number") {
-					const roomIds = params as number[];
-					this.deps.adapter.rLog("System", this.duid, "Info", "1.0", undefined, `Starting segment cleaning for specific rooms: ${roomIds.join(", ")}`, "info");
-					return [{
-						segments: roomIds,
-						repeat: 1,
-						clean_order_mode: 0,
-						clean_mop: 0
-					}];
-				}
-				return params;
-			}
-
-			// Gather selected rooms from floors
-			const namespace = this.deps.adapter.namespace;
-			// Pattern to find states under floors. Structure: Devices.<duid>.floors.<floorID>.<roomID>
-			const pattern = `${namespace}.Devices.${this.duid}.floors.*.*`;
-			const states = await this.deps.adapter.getStatesAsync(pattern);
-			const roomIds: number[] = [];
-
-			if (states) {
-				for (const [id, state] of Object.entries(states)) {
-					if (state && (state.val === true || state.val === "true" || state.val === 1)) {
-						// Extract Room ID directly from the state path (last segment)
-						const parts = id.split(".");
-						const rid = Number(parts[parts.length - 1]);
-						if (!isNaN(rid)) {
-							roomIds.push(rid);
-						}
-					}
-				}
-			}
-
-			if (roomIds.length > 0) {
-				this.deps.adapter.rLog("System", this.duid, "Info", "1.0", undefined, `Starting segment cleaning for rooms: ${roomIds.join(", ")}`, "info");
-
-				// Payload based on user sniff:
-				// params: [{"clean_mop":0,"clean_order_mode":0,"repeat":1,"segments":[2,1]}]
-				const payload = [{
-					segments: roomIds,
-					repeat: 1,
-					clean_order_mode: 0,
-					clean_mop: 0
-				}];
-
-				return payload;
-			} else {
-				this.deps.adapter.rLog("System", this.duid, "Warn", "1.0", undefined, `No rooms selected for segment cleaning!`, "warn");
-				return [];
-			}
-		}
-
-		if (method === "set_custom_mode") {
-			return [Number(params)];
-		}
-
-		if (method === "set_mop_mode") {
-			return [Number(params)];
-		}
-
-		if (method === "set_water_box_custom_mode") {
-			return [Number(params)];
-		}
-
-		if (method === "set_water_box_distance_off") {
-			// Convert 1-30 slider to 230-85 robot value
-			// Formula: 230 - ((val - 1) * 5)
-			let val = Number(params);
-			if (isNaN(val)) val = 1;
-			if (val < 1) val = 1;
-			if (val > 30) val = 30;
-
-			const distance_off = 230 - ((val - 1) * 5);
-			return { distance_off };
-		}
-
-		if (method === "set_clean_repeat_times") {
-			let repeat = Number(params);
-			if (isNaN(repeat)) repeat = 1;
-			return { repeat };
-		}
-
-		return params;
-	}
-
-	public async updateCleanSummary(): Promise<void> {
-		await this.requestAndProcess("get_clean_summary", [], "cleaningInfo", async (data) => {
-			if (data.clean_time) data.clean_time = Math.round((data.clean_time / 3600) * 10) / 10;
-			if (data.clean_area) data.clean_area = Math.round((data.clean_area / 1000000) * 10) / 10;
-
-			// Fetch maps for records in parallel to avoid blocking
-			if (this.deps.config.enable_map_creation && Array.isArray(data.records)) {
-			// Use a local queue to limit concurrency strictly for map downloads
-				const mapQueue = new PQueue({ concurrency: 3 });
-
-				// Get all existing start times in one go to detect shifts
-				const existingStartTimes: Record<string, number> = {}; // timestamp -> index
-				const states = await this.deps.adapter.getStatesAsync(`Devices.${this.duid}.cleaningInfo.records.*.startTime`);
-
-				if (states) {
-					for (const id in states) {
-						if (states[id] && states[id].val) {
-							const parts = id.split(".");
-							// ID structure: roborock.0.Devices.<duid>.cleaningInfo.records.<index>.startTime
-							// We need <index> which is 2nd from last
-							const index = parseInt(parts[parts.length - 2]);
-							if (!isNaN(index)) {
-								existingStartTimes[states[id].val as number] = index;
-							}
-						}
-					}
-				}
-
-				// Sort records descending (newest first)
-				const sortedRecords = [...data.records].sort((a, b) => b - a);
-
-				// Process shifts safely:
-				// - Shift Left (Deletion: index moves 2 -> 1): Must process ASCENDING (1, 2, 3...) to avoid overwriting source.
-				// - Shift Right (Insertion: index moves 1 -> 2): Must process DESCENDING (3, 2, 1...) to avoid overwriting source.
-
-				const moves: { old: number, new: number }[] = [];
-				const newRecs: { index: number, time: number }[] = [];
-
-				for (let i = 0; i < sortedRecords.length; i++) {
-					const time = sortedRecords[i];
-					const oldIndex = existingStartTimes[time];
-
-					if (oldIndex !== undefined && oldIndex !== i) {
-						moves.push({ old: oldIndex, new: i });
-					} else if (oldIndex === undefined) {
-						newRecs.push({ index: i, time });
-					}
-				}
-
-				// 1. Handle Deletions/Left Shifts (e.g. Clean history shortened) - Ascending Order
-				const leftShifts = moves.filter(m => m.old > m.new).sort((a, b) => a.new - b.new);
-				for (const m of leftShifts) {
-					await this.copyRecordStates(m.old, m.new);
-				}
-
-				// 2. Handle Insertions/Right Shifts (New record added at top) - Descending Order
-				const rightShifts = moves.filter(m => m.old < m.new).sort((a, b) => b.new - a.new);
-				for (const m of rightShifts) {
-					await this.copyRecordStates(m.old, m.new);
-				}
-
-				// 3. Process New Records
-				for (const { index, time } of newRecs) {
-					const i = index;
-					const newIndex = index;
-					const startTime = time;
-					await this.fetchAndSaveRecord(startTime, newIndex, i < 3 ? 10 : 0, mapQueue);
-				}
-				await mapQueue.onIdle();
-			}
-
-			return data;
-		});
-	}
-
-	private async copyRecordStates(from: number, to: number): Promise<void> {
-		const prefix = `Devices.${this.duid}.cleaningInfo.records`;
-		const states = await this.deps.adapter.getStatesAsync(`${prefix}.${from}.*`);
-		if (!states) return;
-
-		await Promise.all(Object.entries(states).map(async ([id, state]) => {
-			if (!state || state.val === null) return;
-			const obj = await this.deps.adapter.getObjectAsync(id);
-			if (!obj?.common) return;
-
-			// Replace index in path (roborock.0.Devices...records.5... -> ...records.6...)
-			const destRel = id.substring(this.deps.adapter.namespace.length + 1).replace(`.records.${from}.`, `.records.${to}.`);
-			await this.deps.ensureState(destRel, obj.common as Partial<ioBroker.StateCommon>);
-			await this.deps.adapter.setStateChanged(destRel, { val: state.val, ack: true });
-		}));
-	}
-
-	private async fetchAndSaveRecord(startTime: number, index: number, priority: number, queue: PQueue): Promise<void> {
-		queue.add(async () => {
-			try {
-				const fullRecordPath = `cleaningInfo.records.${index}`;
-
-				// 1. Set Timestamp
-				await this.deps.ensureState(`Devices.${this.duid}.${fullRecordPath}.startTime`, { name: "Start Time", type: "number", role: "value.time", write: false });
-				await this.deps.adapter.setStateChanged(`Devices.${this.duid}.${fullRecordPath}.startTime`, { val: startTime, ack: true });
-
-				// 2. Fetch Metadata
-				const recordsDetails = await this.deps.adapter.requestsHandler.sendRequest(this.duid, "get_clean_record", [startTime]);
-				if (Array.isArray(recordsDetails) && recordsDetails.length > 0 && recordsDetails[0]) {
-					const record = recordsDetails[0];
-					for (const key in record) {
-						let val = record[key];
-						if (key === "area" || key === "cleaned_area") val = Math.round((val / 1000000) * 10) / 10;
-						else if (key === "duration") val = Math.round(val / 60);
-						await this.processResultKey(fullRecordPath, key, val);
-					}
-				}
-
-				// 3. Fetch Map (No limits)
-				const mapResult = await this.mapService.getCleaningRecordMap(startTime);
-				if (mapResult) {
-					const mapFolder = `records.${index}.map`;
-					await this.deps.ensureFolder(`Devices.${this.duid}.cleaningInfo.${mapFolder}`);
-
-					const saveMap = async (suffix: string, name: string, val: string, role = "text.png") => {
-						await this.deps.ensureState(`Devices.${this.duid}.cleaningInfo.${mapFolder}.${suffix}`, { name, type: "string", role });
-						await this.deps.adapter.setStateChanged(`Devices.${this.duid}.cleaningInfo.${mapFolder}.${suffix}`, { val, ack: true });
-					};
-
-					await saveMap("mapBase64", "Map Image", mapResult.mapBase64);
-
-					await saveMap("mapData", "Map Data", mapResult.mapData, "json");
-				} else {
-					this.deps.adapter.rLog("MapManager", this.duid, "Warn", "1.0", undefined, `No map found for record ${startTime}`, "warn");
-				}
-			} catch (e: any) {
-				this.deps.adapter.rLog("System", this.duid, "Warn", "1.0", undefined, `Background fetch for record ${startTime} failed: ${e.message}`, "warn");
-			}
-		}, { priority });
-	}
-
-
-	public async updateNetworkInfo(): Promise<void> {
-		await this.requestAndProcess("get_network_info", [], "networkInfo");
-	}
-
-	public async updateTimers(): Promise<void> {
-		try {
-			const timers = await this.deps.adapter.requestsHandler.sendRequest(this.duid, "get_timer", []);
-			if (Array.isArray(timers)) {
-				await this.deps.ensureFolder(`Devices.${this.duid}.schedules`);
-				await Promise.all(timers.map(async (timer) => {
-					// timer structure: [id, enabled, [cron, [cmd, params], createTime]]
-					if (Array.isArray(timer) && timer.length >= 3) {
-						const id = timer[0];
-						const enabled = timer[1] === "on";
-						const segments = timer[2];
-						const cron = Array.isArray(segments) ? segments[0] : "";
-
-						await this.deps.ensureFolder(`Devices.${this.duid}.schedules.${id}`);
-
-						await this.deps.ensureState(`Devices.${this.duid}.schedules.${id}.enabled`, { name: "Enabled", type: "boolean", role: "switch", write: true });
-						await this.deps.adapter.setStateChanged(`Devices.${this.duid}.schedules.${id}.enabled`, { val: enabled, ack: true });
-
-						await this.deps.ensureState(`Devices.${this.duid}.schedules.${id}.cron`, { name: "CRON", type: "string", role: "text", write: false });
-						await this.deps.adapter.setStateChanged(`Devices.${this.duid}.schedules.${id}.cron`, { val: cron, ack: true });
-					}
-				}));
-			}
-		} catch (e: any) {
-			this.deps.adapter.rLog("System", this.duid, "Warn", undefined, undefined, `Failed to update timers: ${e.message}`, "warn");
-		}
-	}
-
-	public async processStatus(status: any): Promise<void> {
+	async processStatus(status: any): Promise<void> {
     	const validStatus = status || {};
 
 		if (validStatus.dss !== undefined) {
@@ -754,6 +466,9 @@ export class V1VacuumFeatures extends BaseDeviceFeatures {
 		}
 
 		await super.processResultKey(folder, key, val);
+		if (key === "dss" && typeof val === "number") {
+			await this.updateDockingStationStatus(val);
+		}
 	}
 
 	public override getCurrentMapIndex(): number {
@@ -761,4 +476,3 @@ export class V1VacuumFeatures extends BaseDeviceFeatures {
 	}
 
 }
-
