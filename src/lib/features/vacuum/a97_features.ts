@@ -1,4 +1,4 @@
-﻿import { V1VacuumFeatures, VacuumProfile, BASE_FAN, BASE_WATER, BASE_MOP } from "./v1VacuumFeatures";
+import { V1VacuumFeatures, VacuumProfile, BASE_FAN, BASE_WATER, BASE_MOP } from "./v1VacuumFeatures";
 import { RegisterModel, DeviceModelConfig, FeatureDependencies } from "../baseDeviceFeatures";
 import { Feature } from "../features.enum";
 
@@ -17,15 +17,12 @@ const PROFILE_A97: VacuumProfile = {
 
 const a97Config: DeviceModelConfig = {
 	staticFeatures: [
+		Feature.DockingStationStatus,
 		Feature.CommonStatus,
-		Feature.Dss,
-		Feature.Rss,
-		Feature.Kct,
 		Feature.RobotStatus,
 		Feature.CleanPercent,
 		Feature.ChargeStatus,
 		Feature.InWarmup,
-		Feature.MapFlag,
 		Feature.TaskId,
 		Feature.LastCleanTime,
 		Feature.SwitchStatus,
